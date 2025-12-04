@@ -9,7 +9,10 @@ Final boss (above) apears when you reach a score of 100.
 Minimalistic Shooter is made to be a game that is able to run on 60fps+ most devices that use WebGL, no matter how low end the device is.
 If this game is lagging your device, it might be time to save up for a new one.
 
+
+
 PLANNED FEATURES:
+
 A mobile version of the game!
 
 More Enemies: Smart Drones, Splitters, Shielded Enemies, Chargers, Cloaked Units, Snipers, and maybe more...
@@ -43,9 +46,9 @@ Meta Progression: Unlockable Characters with different movement speed, bullet st
 Overclocks: Overclocks make you immortal for a short period of time. More Overclock types to be also added, but are currently in the drafting phase.
 
 Economy: Currency will be called Meta.
-Killing a enemy will give you 1 Meta, the ingame currency. Meta will be used in the shop and maybe more...Killing a boss will give 10 Meta.
+Killing a enemy will give you 1 Meta, the ingame currency. Meta will be used in the shop and maybe more. Killing a boss will give 10 Meta.
 
-Bosses: Bosses will appear every 6 waves. Diffent bosses fights like The Eye (follows player with giant lazer sweeps), Fracture Core (with different phases that slowly breaks into more smaller cores, The Worm (Segmented enemy and moves around and will be difficult to shoot), and The Time Eater (slows and speeds up time)
+Bosses: Bosses will appear every 6 waves. Diffent bosses fights like The Eye (follows player with giant lazer sweeps), Fracture Core (with different phases that slowly breaks into more smaller cores), The Worm (Segmented enemy and moves around and will be difficult to shoot), and The Time Eater (slows and speeds up time)
 
 Difficulty: Difficulties will be something that will be added to the menu before starting a wave. Modes will be Easy, Normal, Hard, Nightmare, and HACKER (jk about that last one)
 Game speed, enemy spawn rate, and enemy bullet logic will be changed for each difficulty. Current game plays like how I expect normal will.
