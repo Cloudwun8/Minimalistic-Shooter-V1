@@ -1,0 +1,675 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Minimalist Shooter — Fixed + Effects</title>
+<style>
+    body { background: #000; margin: 0; overflow: hidden; font-family: Arial, sans-serif; }
+    /* keep the original game canvas available but hidden visually (we render processed image to #crt) */
+    canvas#game { display: none; }
+    canvas#crt {
+        display: block;
+        margin: 0 auto;
+        background: #050505;
+        border: 2px solid #444;
+        image-rendering: pixelated;
+    }
+</style>
+</head>
+<body>
+<canvas id="game" width="500" height="600"></canvas>
+<!-- post-processed final output -->
+<canvas id="crt" width="500" height="600"></canvas>
+
+<script>
+// CANVAS
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+const W = canvas.width, H = canvas.height;
+
+// CRT output canvas (WebGL)
+const crtCanvas = document.getElementById("crt");
+
+// INPUT
+const keys = {};
+document.addEventListener("keydown", e => keys[e.code] = true);
+document.addEventListener("keyup",   e => keys[e.code] = false);
+
+// HELPERS
+const rand = (min, max) => Math.random() * (max - min) + min;
+const chance = p => Math.random() < p;
+function overlap(a,b){ return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y; }
+const rect = o => ({ x: o.x, y: o.y, w: o.w, h: o.h });
+
+// STARFIELD
+const stars = Array.from({length:100}, () => ({ x: rand(0,W), y: rand(0,H), size: rand(1,3), speed: rand(0.2,0.7) }));
+function updateStars(delta){ stars.forEach(s => { s.y += s.speed * (delta/16); if (s.y>H){ s.y=0; s.x=rand(0,W); s.size=rand(1,3); s.speed=rand(0.2,0.7); } }); }
+function drawStars(){ ctx.fillStyle="white"; for(const s of stars){ ctx.globalAlpha = s.size/3; ctx.fillRect(s.x,s.y,s.size,s.size);} ctx.globalAlpha=1; }
+
+// ------------------------------------------------------------------
+// START MENU (ADDED) — animated title + particles + start handling
+// ------------------------------------------------------------------
+// NOTE: This entire block is additional menu code only — it does not
+// change any existing game logic/functions or variable names.
+let gameState = "menu"; // "menu" or "playing"
+let titleWave = 0;
+let titleParticles = [];
+function spawnTitleParticle(){
+    titleParticles.push({
+        x: rand(0, W),
+        y: rand(0, H/2),
+        vx: rand(-0.5,0.5),
+        vy: rand(-0.5,0.5),
+        size: rand(1,3),
+        life: rand(200,600)
+    });
+}
+// Keep particles topped up when on menu
+setInterval(()=>{ if(gameState === "menu" && titleParticles.length < 80) spawnTitleParticle(); }, 80);
+
+function updateTitleParticles(delta){
+    titleParticles.forEach(p=>{
+        p.x += p.vx;
+        p.y += p.vy;
+        p.life -= delta;
+    });
+    titleParticles = titleParticles.filter(p=>p.life>0);
+}
+
+function drawTitleParticles(){
+    ctx.fillStyle = "white";
+    for (const p of titleParticles) {
+        ctx.globalAlpha = Math.max(p.life/600, 0);
+        ctx.fillRect(p.x, p.y, p.size, p.size);
+    }
+    ctx.globalAlpha = 1;
+}
+
+function drawStartMenu(delta){
+    // subtle background (keep starfield visible)
+    ctx.clearRect(0,0,W,H);
+    drawStars();
+
+    // overlay to darken for text legibility
+    ctx.fillStyle = 'rgba(0,0,0,0.45)';
+    ctx.fillRect(0,0,W,H);
+
+    // update + draw title particles
+    titleWave += delta * 0.003;
+    updateTitleParticles(delta);
+    drawTitleParticles();
+
+    // animated title wobble
+    ctx.fillStyle = "white";
+    ctx.font = "48px Arial";
+    ctx.textAlign = 'center';
+    const wobble = Math.sin(titleWave) * 10;
+    ctx.fillText("MINIMALIST SHOOTER", W/2, H/2 - 100 + wobble);
+
+    ctx.font = "26px Arial";
+    ctx.fillText("Click or Press Enter to Start", W/2, H/2 + 20);
+
+    ctx.font = "16px Arial";
+    ctx.fillStyle = "white";
+    ctx.fillText("Move: Arrow Keys  |  Shoot: Space", W/2, H/2 + 90);
+
+    ctx.textAlign = 'start';
+}
+
+// startGame mutates existing const `player` object rather than reassigning.
+// (Important: the rest of your code expects `player` to be the original const.)
+function startGame(){
+    // reset gameplay state while keeping same variables
+    score = 0;
+    gameOver = false;
+    enemies = [];
+    bullets = [];
+    enemyBullets = [];
+    powerUps = [];
+    particles = [];
+    lasers = [];
+    bossSpawned = false;
+
+    // reset player (mutate properties)
+    if (typeof player !== 'undefined') {
+        player.x = W/2 - player.w/2;
+        player.y = H - 80;
+        player.hearts = 3;
+        player.shield = false;
+        player.cooldown = player.baseCooldown;
+        player.lastShot = 0;
+        player.alive = true;
+    }
+
+    // switch to playing
+    gameState = "playing";
+
+    // ensure timing is reset fairly
+    lastTime = performance.now();
+}
+
+// Add input hooks for start (crt click + Enter)
+crtCanvas.addEventListener("click", () => {
+    if (gameState === "menu") startGame();
+});
+document.addEventListener("keydown", (e) => {
+    if (gameState === "menu" && e.code === "Enter") startGame();
+    // leave other key behavior intact (already wired above)
+});
+
+// also keep original canvas click in case someone clicks it (even if hidden)
+canvas.addEventListener("click", () => {
+    if (gameState === "menu") startGame();
+});
+
+// ------------------------------------------------------------------
+// GAME STATE
+// ------------------------------------------------------------------
+let score = 0;
+let gameOver = false;
+let enemies = [], bullets = [], enemyBullets = [], powerUps = [], particles = [], lasers = [];
+let bossSpawned = false;
+let lastTime = performance.now();
+
+const effects = { piercing:false, sideShot:false, bigBullets:false, autoShoot:false, fireRate:false };
+function activateEffect(name, duration=20000){ effects[name]=true; setTimeout(()=>effects[name]=false, duration); }
+
+// PARTICLES & LASERS
+function spawnExplosion(x,y,color){ for(let i=0;i<16;i++) particles.push({ x,y, vx:rand(-2,2), vy:rand(-2,2), life:rand(300,600), color }); }
+function spawnLaserHit(x,y){ lasers.push({x,y,life:180}); }
+function updateParticles(delta){ particles = particles.filter(p => { p.x+=p.vx; p.y+=p.vy; p.life-=delta; return p.life>0; }); }
+function drawParticles(){ for(const p of particles){ ctx.globalAlpha = Math.max(p.life/600,0); ctx.fillStyle = p.color; ctx.fillRect(p.x,p.y,3,3); } ctx.globalAlpha=1; }
+function updateLasers(delta){ lasers = lasers.filter(l => (l.life -= delta) > 0); }
+function drawLasers(){ ctx.strokeStyle="cyan"; for(const l of lasers){ ctx.globalAlpha = Math.max(l.life/180,0); ctx.beginPath(); ctx.moveTo(l.x-10,l.y); ctx.lineTo(l.x+10,l.y); ctx.stroke(); } ctx.globalAlpha=1; }
+
+// PLAYER
+class Player {
+    constructor(){
+        this.w=32; this.h=40; this.x=W/2-this.w/2; this.y=H-80; this.speed=6;
+        this.hearts=3; this.shield=false;
+        this.baseCooldown=200; this.cooldown=200; this.lastShot=0;
+        this.alive=true;
+    }
+    centerX(){ return this.x + this.w/2; }
+    takeDamage(){ if(this.shield){ this.shield=false; return; } if(--this.hearts <= 0){ this.alive=false; gameOver=true; } }
+    shoot(){
+        bullets.push(new Bullet(this.centerX()-2, this.y-10, -8, "yellow", false, effects.piercing, 0, effects.bigBullets));
+        if(effects.sideShot){
+            bullets.push(new Bullet(this.centerX()-2, this.y-10, -8, "yellow", false, effects.piercing, -2, false));
+            bullets.push(new Bullet(this.centerX()-2, this.y-10, -8, "yellow", false, effects.piercing,  2, false));
+        }
+    }
+    update(){
+        if(!this.alive) return;
+        if(keys["ArrowLeft"] && this.x>10) this.x -= this.speed;
+        if(keys["ArrowRight"] && this.x < W - this.w - 10) this.x += this.speed;
+        const now = performance.now();
+        const shooting = keys["Space"] || effects.autoShoot;
+        if(shooting && now - this.lastShot > this.cooldown){ this.shoot(); this.lastShot = now; }
+    }
+    draw(){
+        if(!this.alive) return;
+        ctx.fillStyle = this.shield ? "lightblue" : "white";
+        ctx.beginPath();
+        ctx.moveTo(this.centerX(), this.y);
+        ctx.lineTo(this.x + this.w, this.y + this.h);
+        ctx.lineTo(this.x, this.y + this.h);
+        ctx.closePath();
+        ctx.fill();
+    }
+}
+const player = new Player();
+
+// BULLET
+// constructor(x,y, vy, color, big=false, piercing=false, vx=0, bigFlagForSizing=false)
+// note: we accept vx as the last argument; vy is third.
+class Bullet {
+    constructor(x,y, vy, color, big=false, piercing=false, vx=0, altBig=false){
+        this.x = x; this.y = y; this.vx = vx; this.vy = vy;
+        // keep compatibility: big or altBig can make it larger
+        const bigFlag = big || altBig;
+        this.w = bigFlag ? 10 : 4;
+        this.h = bigFlag ? 18 : 10;
+        this.color = color;
+        this.piercing = piercing;
+        this.alive = true;
+    }
+    update(){ this.x += this.vx; this.y += this.vy; if(this.y < -30 || this.y > H+30 || this.x < -30 || this.x > W+30) this.alive = false; }
+    draw(){ ctx.fillStyle = this.color; ctx.fillRect(this.x, this.y, this.w, this.h); }
+}
+
+// POWERUPS
+class PowerUp {
+    constructor(x,y,type){
+        this.x=x; this.y=y; this.w=26; this.h=26; this.type=type; this.speed=2; this.dead=false;
+        this.color = { sideShot:"cyan", piercing:"purple", fireRate:"lime", autoShoot:"white", bigBullet:"yellow", oneUp:"pink", shield:"lightblue" }[type];
+    }
+    update(){ this.y += this.speed; if(this.y > H+30) this.dead = true; }
+    draw(){ ctx.fillStyle = this.color; ctx.fillRect(this.x,this.y,this.w,this.h); }
+}
+function spawnPower(x,y){ const types=["sideShot","piercing","fireRate","autoShoot","bigBullet","oneUp","shield"]; powerUps.push(new PowerUp(x,y, types[(Math.random()*types.length)|0] )); }
+function applyPower(type){
+    switch(type){
+        case "sideShot": activateEffect("sideShot"); break;
+        case "piercing": activateEffect("piercing"); break;
+        case "fireRate": player.cooldown = 100; setTimeout(()=>player.cooldown = player.baseCooldown, 20000); break;
+        case "autoShoot": activateEffect("autoShoot"); break;
+        case "bigBullet": activateEffect("bigBullets"); break;
+        case "oneUp": if(player.hearts < 3) player.hearts++; break;
+        case "shield": player.shield = true; break;
+    }
+}
+
+// ENEMIES
+class Enemy { constructor(x,y,w,h,speed,hp=1){ this.x=x; this.y=y; this.w=w; this.h=h; this.speed=speed; this.hp=hp; this.dead=false; } update(){ this.y += this.speed; } draw(){ ctx.fillStyle="red"; ctx.fillRect(this.x,this.y,this.w,this.h); } }
+class FastEnemy extends Enemy { constructor(x,y){ super(x,y,25,25,3,1); } }
+class TankEnemy extends Enemy { constructor(x,y){ super(x,y,60,60,1,5); } }
+class ZigZagEnemy extends Enemy { constructor(x,y){ super(x,y,35,35,2,2); this.amp=rand(20,50); this.freq=rand(0.02,0.05); this.originX=x; this.t=0; } update(){ this.t++; this.y+=this.speed; this.x = this.originX + Math.sin(this.t*this.freq)*this.amp; } }
+class ShooterEnemy extends Enemy { constructor(x,y){ super(x,y,40,40,1.5,3); this.lastShot=performance.now(); this.cooldown=1200; } update(){ super.update(); const now=performance.now(); if(now-this.lastShot>this.cooldown){ enemyBullets.push(new Bullet(this.x+this.w/2-2, this.y+this.h, 4, "orange")); this.lastShot = now; } } }
+class MiniBoss extends Enemy { constructor(x,y){ super(x,y,80,80,0.8,20); this.lastShot=performance.now(); this.cooldown=800; } update(){ this.y += this.speed; const now = performance.now(); if(now-this.lastShot>this.cooldown){ for(let a=-1;a<=1;a++) enemyBullets.push(new Bullet(this.x+this.w/2-2, this.y+this.h, 4, "orange", false, false, a*2)); this.lastShot = now; } } draw(){ ctx.fillStyle="magenta"; ctx.fillRect(this.x,this.y,this.w,this.h); } }
+class FinalBoss extends Enemy {
+    constructor(x,y){ super(x,y,150,150,0,200); this.t=0; this.lastShot=performance.now(); this.cooldown=600; }
+    update(){
+        this.t++;
+        if(this.y < 50) this.y += 1;
+        this.x = W/2 - this.w/2 + Math.sin(this.t*0.01)*100;
+        const now = performance.now();
+        if(now - this.lastShot > this.cooldown){
+            // radial burst: pass vy then color then big then piercing then vx
+            for(let a=0;a<360;a+=20){
+                const rad = a * Math.PI / 180;
+                const vx = 4 * Math.cos(rad);
+                const vy = 4 * Math.sin(rad);
+                enemyBullets.push(new Bullet(this.x + this.w/2, this.y + this.h/2, vy, "orange", false, false, vx));
+            }
+            // downward spread (vy positive)
+            for(let i=-2;i<=2;i++){
+                enemyBullets.push(new Bullet(this.x + this.w/2 + i*20, this.y + this.h, 6, "orange"));
+            }
+            this.lastShot = now;
+        }
+    }
+    draw(){
+        ctx.save();
+        ctx.translate(this.x + this.w/2, this.y + this.h/2);
+        const colors = ["red","magenta","orange"];
+        for(let i=0;i<3;i++){ let s = this.w - i*30; ctx.strokeStyle = colors[i]; ctx.lineWidth = 3; ctx.strokeRect(-s/2,-s/2,s,s); }
+        ctx.restore();
+        ctx.fillStyle="white"; ctx.fillRect(this.x,this.y-10,this.w,6);
+        ctx.fillStyle="lime"; ctx.fillRect(this.x,this.y-10,this.w*(this.hp/200),6);
+    }
+}
+
+// SPAWN HELPERS
+function spawnEnemy(){ const r=Math.random(), x=rand(20,W-60); if(r<0.3) enemies.push(new FastEnemy(x,-30)); else if(r<0.5) enemies.push(new TankEnemy(x,-60)); else if(r<0.7) enemies.push(new ZigZagEnemy(x,-40)); else enemies.push(new ShooterEnemy(x,-40)); }
+function spawnFinalBoss(){ bossSpawned=true; enemies.push(new FinalBoss(W/2-75,-150)); }
+
+// UPDATE FUNCTIONS
+function updatePlayer(){
+    player.update();
+    enemyBullets.forEach(b => { if(overlap(rect(b), rect(player))){ b.alive = false; player.takeDamage(); } });
+
+    powerUps = powerUps.filter(p => {
+        if(overlap(rect(p), rect(player))){ applyPower(p.type); return false; }
+        p.update();
+        return !p.dead;
+    });
+}
+
+function updateBullets(){
+    bullets = bullets.filter(b => { b.update(); return b.alive; });
+    enemyBullets = enemyBullets.filter(b => { b.update(); return b.alive; });
+
+    for(const b of bullets){
+        if(!b.alive) continue;
+        for(const e of enemies){
+            if(overlap(rect(b), rect(e))){
+                e.hp--;
+                if(!b.piercing) b.alive = false;
+                if(e.hp <= 0){ e.dead = true; spawnExplosion(e.x+e.w/2, e.y+e.h/2, "red"); score++; if(chance(0.15)) spawnPower(e.x, e.y); }
+                break;
+            }
+        }
+    }
+}
+
+function updateEnemies(){
+    enemies = enemies.filter(e => { e.update(); return !e.dead && e.y < H + 100; });
+    powerUps = powerUps.filter(p => !p.dead);
+}
+
+function updateAll(delta){
+    if(player.alive){
+        updatePlayer();
+        updateBullets();
+        updateEnemies();
+        updateParticles(delta);
+        updateLasers(delta);
+        updateStars(delta);
+        if(!bossSpawned && score >= 100) spawnFinalBoss();
+    }
+}
+
+// ------------------------
+// GRAPHICAL EFFECTS (ADDITIONS)
+// ------------------------
+let screenShake = 0; // set to >0 to trigger a shake for a few frames
+function applyScreenShake() {
+    if (screenShake > 0) {
+        const sx = (Math.random() - 0.5) * screenShake;
+        const sy = (Math.random() - 0.5) * screenShake;
+        ctx.translate(sx, sy);
+        // decay
+        screenShake *= 0.88;
+        if (screenShake < 0.05) screenShake = 0;
+    }
+}
+
+// Glow pass: additive glow for bullets, enemies, player
+function drawGlow() {
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+
+    // bullets glow
+    for (const b of bullets) {
+        ctx.save();
+        ctx.fillStyle = b.color || 'yellow';
+        ctx.shadowColor = b.color || 'yellow';
+        ctx.shadowBlur = 16;
+        // draw centered glow circle near bullet
+        ctx.beginPath();
+        ctx.arc(b.x + b.w/2, b.y + b.h/2, Math.max(b.w, b.h), 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+    }
+
+    // enemy core glow
+    for (const e of enemies) {
+        ctx.save();
+        // color based on type (magenta for miniboss, orange-ish for shooters else red)
+        let color = 'red';
+        if (e instanceof MiniBoss) color = 'magenta';
+        if (e instanceof FinalBoss) color = 'orange';
+        ctx.fillStyle = color;
+        ctx.shadowColor = color;
+        ctx.shadowBlur = 24;
+        ctx.beginPath();
+        ctx.arc(e.x + e.w/2, e.y + e.h/2, Math.max(e.w, e.h) * 0.6, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+    }
+
+    // player glow when shielded
+    if (player && player.alive) {
+        ctx.save();
+        const color = player.shield ? 'lightblue' : 'white';
+        ctx.fillStyle = color;
+        ctx.shadowColor = color;
+        ctx.shadowBlur = player.shield ? 32 : 10;
+        ctx.beginPath();
+        ctx.arc(player.centerX(), player.y + player.h/2, player.w * 0.9, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+    }
+
+    ctx.restore();
+}
+
+// Vignette for atmosphere
+function drawVignette() {
+    const g = ctx.createRadialGradient(W/2, H/2, Math.min(W,H)*0.2, W/2, H/2, Math.max(W,H)*0.8);
+    g.addColorStop(0, 'rgba(0,0,0,0)');
+    g.addColorStop(0.7, 'rgba(0,0,0,0.25)');
+    g.addColorStop(1, 'rgba(0,0,0,0.7)');
+    ctx.save();
+    ctx.globalCompositeOperation = 'multiply';
+    ctx.fillStyle = g;
+    ctx.fillRect(0,0,W,H);
+    ctx.restore();
+}
+
+// CRT scanlines (very subtle)
+function drawScanlines() {
+    ctx.save();
+    ctx.globalAlpha = 0.06;
+    ctx.fillStyle = 'black';
+    for (let y = 0; y < H; y += 3) {
+        ctx.fillRect(0, y, W, 1);
+    }
+    ctx.restore();
+}
+
+// small sparkle overlay for bullets (purely visual)
+function drawBulletSparks() {
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    for (const b of bullets) {
+        if (Math.random() < 0.06) {
+            ctx.fillStyle = 'white';
+            ctx.globalAlpha = 0.9;
+            ctx.fillRect(b.x + b.w/2 - 1, b.y + b.h/2 - 1, 2, 2);
+        }
+    }
+    ctx.restore();
+}
+
+// ------------------------
+// DRAW
+// ------------------------
+function draw() {
+    ctx.clearRect(0,0,W,H);
+
+    // camera shake can be applied right before scene draw
+    ctx.save();
+    applyScreenShake();
+
+    drawStars();
+    player.draw();
+    enemies.forEach(e => e.draw());
+    bullets.forEach(b => b.draw());
+    enemyBullets.forEach(b => b.draw());
+    powerUps.forEach(p => p.draw());
+    drawParticles();
+    drawLasers();
+
+    // additive glow pass (draw after base geometry)
+    drawGlow();
+
+    // small sparkle
+    drawBulletSparks();
+
+    // UI
+    ctx.fillStyle="white"; ctx.font="20px Arial"; ctx.fillText("Score: "+score,10,25);
+    for(let i=0;i<player.hearts;i++){ ctx.fillStyle="red"; ctx.fillRect(10+i*20,40,15,15); }
+    if(player.shield){ ctx.strokeStyle="lightblue"; ctx.lineWidth=3; ctx.beginPath(); ctx.arc(player.centerX(), player.y + player.h/2, 25, 0, Math.PI*2); ctx.stroke(); }
+
+    // vignette + scanlines on top
+    drawVignette();
+    drawScanlines();
+
+    // game over text (kept original)
+    if(gameOver){
+        ctx.fillStyle="white"; ctx.font="40px Arial"; ctx.fillText("GAME OVER", W/2 - 120, H/2);
+        ctx.font="20px Arial"; ctx.fillText("Refresh to restart", W/2 - 90, H/2 + 40);
+    }
+
+    ctx.restore(); // restore after screen shake
+}
+
+// ------------------------
+// WEBGL CRT POST-PROCESSING
+// ------------------------
+// We'll create a simple WebGL shader that samples the game's canvas as a texture,
+// applies barrel/fisheye distortion, chromatic aberration, scanlines and vignette,
+// and then draws to the visible crtCanvas.
+
+const gl = crtCanvas.getContext("webgl", { preserveDrawingBuffer: false });
+if (!gl) {
+    console.warn("WebGL not available — post-processing disabled.");
+}
+
+// FIX ROTATION: ensure texture upload isn't flipped vertically
+if (gl) {
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+}
+
+// compile helpers
+function compileShader(gl, type, src){
+    const s = gl.createShader(type);
+    gl.shaderSource(s, src);
+    gl.compileShader(s);
+    if(!gl.getShaderParameter(s, gl.COMPILE_STATUS)){
+        console.error("Shader compile error:", gl.getShaderInfoLog(s), src);
+    }
+    return s;
+}
+
+if (gl) {
+    const vsrc = `
+    attribute vec2 a_pos;
+    varying vec2 v_uv;
+    void main(){
+        v_uv = a_pos * 0.5 + 0.5;
+        gl_Position = vec4(a_pos, 0.0, 1.0);
+    }`;
+    const fsrc = `
+    precision mediump float;
+    varying vec2 v_uv;
+    uniform sampler2D u_tex;
+    uniform float u_time;
+    uniform vec2 u_resolution;
+
+    // simple barrel/fisheye distortion
+    vec2 barrel(vec2 uv, float amt){
+        vec2 cc = uv - 0.5;
+        float dist = dot(cc, cc);
+        return uv + cc * dist * amt;
+    }
+
+    void main(){
+        vec2 uv = v_uv;
+
+        // subtle screen wobble (optional, tied to time)
+        float wob = sin(u_time * 1.2) * 0.0015;
+        uv.x += wob * (uv.y - 0.5);
+
+        // barrel/fisheye
+        uv = barrel(uv, 0.22);
+
+        // chromatic aberration offsets
+        float ca = 0.004; // strength
+        vec3 col;
+        // sample R/G/B separately with small offsets
+        col.r = texture2D(u_tex, uv + vec2(ca, 0.0)).r;
+        col.g = texture2D(u_tex, uv).g;
+        col.b = texture2D(u_tex, uv - vec2(ca, 0.0)).b;
+
+        // scanlines (darken alternating rows)
+        float scans = sin((uv.y * u_resolution.y) * 1.5) * 0.06;
+        col -= scans;
+
+        // slight noise (gives CRT grain)
+        float n = fract(sin(dot(uv.xy * u_time , vec2(12.9898,78.233))) * 43758.5453);
+        col += (n - 0.5) * 0.004;
+
+        // vignette
+        float vig = 1.0 - dot(v_uv - 0.5, v_uv - 0.5) * 1.6;
+        col *= vig;
+
+        // clamp and gamma-ish tweak
+        col = pow(clamp(col, 0.0, 1.0), vec3(0.95));
+
+        gl_FragColor = vec4(col, 1.0);
+    }`;
+
+    const vsh = compileShader(gl, gl.VERTEX_SHADER, vsrc);
+    const fsh = compileShader(gl, gl.FRAGMENT_SHADER, fsrc);
+    const prog = gl.createProgram();
+    gl.attachShader(prog, vsh);
+    gl.attachShader(prog, fsh);
+    gl.linkProgram(prog);
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+        console.error("Program link error:", gl.getProgramInfoLog(prog));
+    }
+    gl.useProgram(prog);
+
+    // Fullscreen quad
+    const quad = new Float32Array([-1,-1, 1,-1, -1,1, 1,1]);
+    const buffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+    gl.bufferData(gl.ARRAY_BUFFER, quad, gl.STATIC_DRAW);
+    const aPos = gl.getAttribLocation(prog, "a_pos");
+    gl.enableVertexAttribArray(aPos);
+    gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
+
+    // uniforms
+    const timeLoc = gl.getUniformLocation(prog, "u_time");
+    const resLoc  = gl.getUniformLocation(prog, "u_resolution");
+
+    // texture (we'll upload from the 2D game canvas each frame)
+    const tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+    function renderCRT(){
+        // set viewport & uniforms
+        gl.viewport(0, 0, crtCanvas.width, crtCanvas.height);
+        gl.clearColor(0,0,0,1);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+
+        gl.uniform1f(timeLoc, performance.now() * 0.001);
+        gl.uniform2f(resLoc, crtCanvas.width, crtCanvas.height);
+
+        // upload current game canvas as texture
+        gl.bindTexture(gl.TEXTURE_2D, tex);
+        try {
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, canvas);
+        } catch (e) {
+            // some browsers may require canvas to be same-origin (it is), but catch anyway
+            console.error("Error uploading canvas to texture:", e);
+        }
+
+        // draw
+        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    }
+
+    // initial render of menu so user sees something immediately
+    renderCRT();
+}
+
+// ------------------------
+// DRAW + LOOP
+// ------------------------
+setInterval(()=>{ if(!bossSpawned) spawnEnemy(); }, 1200);
+
+function loop(){
+    const now = performance.now();
+    const delta = now - lastTime;
+    lastTime = now;
+
+    // show menu when appropriate
+    if (gameState === "menu") {
+        drawStartMenu(delta);
+    } else {
+        updateAll(delta);
+        draw();
+    }
+
+    // always post-process the contents of the game canvas to the visible crt canvas
+    if (gl) {
+        renderCRT();
+    } else {
+        // fallback: if WebGL not available, just copy the 2D canvas to crt
+        const outCtx = crtCanvas.getContext("2d");
+        outCtx.clearRect(0,0,crtCanvas.width, crtCanvas.height);
+        outCtx.drawImage(canvas, 0, 0);
+    }
+
+    requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
